@@ -15,6 +15,7 @@ NS="$3"    # e.g. comintern
 get_tag () {
   local src="$1"
   if [[ "$src" == *@* ]]; then
+    # digest reference, normalize to a tag-like suffix
     echo "digest-$(echo "${src#*@}" | tr ':' '-')"
     return 0
   fi
@@ -22,21 +23,30 @@ get_tag () {
     echo "${src##*:}"
     return 0
   fi
+  # no tag, default latest
   echo "latest"
 }
 
-# Base name rule: keep ONLY the last segment as repo name, drop registry/namespace.
+# Base name rule (your preferred default):
+# Keep ONLY the last segment as repo name, drop registry/namespace.
+# e.g. ghcr.io/hkuds/lightrag -> lightrag
 map_dest_repo_name_only () {
   local src="$1"
+
   local ref="$src"
   ref="${ref%@*}"   # drop digest
   ref="${ref%%:*}"  # drop tag
+
   echo "${ref##*/}"
 }
 
-# Flatten rule (fallback on conflict): drop registry if present, keep remaining path, replace '/' with '-'
+# Flatten rule (fallback on conflict):
+# Drop registry if present, keep remaining path, replace '/' with '-'
+# e.g. ghcr.io/hkuds/lightrag -> hkuds-lightrag
+# e.g. infiniflow/ragflow -> infiniflow-ragflow
 map_dest_repo_flatten () {
   local src="$1"
+
   local ref="$src"
   ref="${ref%@*}"   # drop digest
   ref="${ref%%:*}"  # drop tag
@@ -54,6 +64,7 @@ map_dest_repo_flatten () {
 }
 
 digest_of () {
+  # return manifest digest; empty if not found
   skopeo inspect --format '{{.Digest}}' "docker://$1" 2>/dev/null || true
 }
 
@@ -65,21 +76,11 @@ if [[ "${#SOURCES[@]}" -eq 0 ]]; then
 fi
 
 # ========== Stage 2: Detect conflicts under name-only mapping ==========
+# conflict key = "<repo_name_only>:<tag>"
 declare -A FIRST_SRC_FOR_KEY
 declare -A NEED_FLATTEN_FOR_KEY
 
-for SRC0 in "${SOURCES[@]}"; do
-  # Fallback: if still like ${VAR:-default}, extract default
-  SRC="$SRC0"
-  if [[ "$SRC" =~ ^\$\{[A-Za-z0-9_]+:-([^}]+)\}$ ]]; then
-    SRC="${BASH_REMATCH[1]}"
-  fi
-
-  # If still has ${...}, skip it in conflict detection (will also be skipped later)
-  if [[ "$SRC" == *'${'* ]]; then
-    continue
-  fi
-
+for SRC in "${SOURCES[@]}"; do
   REPO_NAME="$(map_dest_repo_name_only "$SRC")"
   TAG="$(get_tag "$SRC")"
   KEY="${REPO_NAME}:${TAG}"
@@ -93,6 +94,7 @@ for SRC0 in "${SOURCES[@]}"; do
   fi
 done
 
+# Print conflicts summary (if any)
 CONFLICT_COUNT=0
 for k in "${!NEED_FLATTEN_FOR_KEY[@]}"; do
   ((CONFLICT_COUNT++)) || true
@@ -106,25 +108,12 @@ if [[ "$CONFLICT_COUNT" -gt 0 ]]; then
 fi
 
 # ========== Stage 3: Mirror ==========
-for SRC0 in "${SOURCES[@]}"; do
-  SRC="$SRC0"
-
-  # Fallback: if SRC is still ${VAR:-default}, use default part
-  if [[ "$SRC" =~ ^\$\{[A-Za-z0-9_]+:-([^}]+)\}$ ]]; then
-    echo "[INFO] Expand template ref: $SRC -> ${BASH_REMATCH[1]}"
-    SRC="${BASH_REMATCH[1]}"
-  fi
-
-  # If still contains '${', it's unsafe; skip
-  if [[ "$SRC" == *'${'* ]]; then
-    echo "[WARN] Skip unexpanded image: $SRC"
-    continue
-  fi
-
+for SRC in "${SOURCES[@]}"; do
   REPO_NAME_ONLY="$(map_dest_repo_name_only "$SRC")"
   TAG="$(get_tag "$SRC")"
   KEY="${REPO_NAME_ONLY}:${TAG}"
 
+  # choose mapping: name-only by default; flatten only for conflicted keys
   if [[ -n "${NEED_FLATTEN_FOR_KEY[$KEY]+x}" ]]; then
     REPO="$(map_dest_repo_flatten "$SRC")"
     echo "[INFO] Fallback to flatten mapping for conflict key=$KEY : $SRC -> repo=$REPO"
