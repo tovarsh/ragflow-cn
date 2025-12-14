@@ -3,7 +3,7 @@ name: Sync RAGFlow docker images
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 */2 * * *"   # 每 2 小时检查一次（你也可以改成每天一次）
+    - cron: "17 */6 * * *"   # 每 2 小时检查一次（你也可以改成每天一次）
 
 permissions:
   contents: write  # 允许回写 state 指纹文件
