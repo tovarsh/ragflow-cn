@@ -3,4 +3,9 @@ name = "ragflow-cn"
 version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pyyaml",
+]
+
+[pip]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"

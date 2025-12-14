@@ -1,0 +1,92 @@
+name: Sync RAGFlow docker images
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */2 * * *"   # 每 2 小时检查一次（你也可以改成每天一次）
+
+permissions:
+  contents: write  # 允许回写 state 指纹文件
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo jq
+          python -m pip install --upgrade pip
+          pip install pyyaml
+
+      - name: Login Tencent registry
+        env:
+          REG: ${{ secrets.TENCENT_REGISTRY }}
+          USER: ${{ secrets.TENCENT_USERNAME }}
+          PASS: ${{ secrets.TENCENT_PASSWORD }}
+        run: |
+          skopeo login --username "$USER" --password "$PASS" "$REG"
+
+      - name: Fetch upstream docker configs
+        run: |
+          mkdir -p upstream
+          # 官方 docker/.env 明确含 RAGFLOW_IMAGE 等变量
+          curl -fsSL https://raw.githubusercontent.com/infiniflow/ragflow/main/docker/.env \
+            -o upstream/.env
+          curl -fsSL https://raw.githubusercontent.com/infiniflow/ragflow/main/docker/docker-compose.yml \
+            -o upstream/docker-compose.yml
+          curl -fsSL https://raw.githubusercontent.com/infiniflow/ragflow/main/docker/docker-compose-base.yml \
+            -o upstream/docker-compose-base.yml
+
+      - name: Compute fingerprint and decide whether to run
+        id: fp
+        run: |
+          mkdir -p state
+          NEW=$(cat upstream/.env upstream/docker-compose.yml upstream/docker-compose-base.yml | sha256sum | awk '{print $1}')
+          OLD_FILE=state/ragflow_docker_fingerprint.txt
+          OLD=""
+          if [ -f "$OLD_FILE" ]; then OLD=$(cat "$OLD_FILE" || true); fi
+          echo "new=$NEW" >> $GITHUB_OUTPUT
+          echo "old=$OLD" >> $GITHUB_OUTPUT
+          if [ "$NEW" = "$OLD" ]; then
+            echo "No changes detected. Exit."
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "Changed."
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Collect images from upstream configs
+        if: steps.fp.outputs.changed == 'true'
+        run: |
+          python scripts/collect.py \
+            --env upstream/.env \
+            --compose upstream/docker-compose.yml \
+            --base upstream/docker-compose-base.yml \
+            --out upstream/images.json
+
+      - name: Mirror images (digest-aware)
+        if: steps.fp.outputs.changed == 'true'
+        env:
+          REG: ${{ secrets.TENCENT_REGISTRY }}
+          NS:  ${{ secrets.TENCENT_NAMESPACE }}
+        run: |
+          bash scripts/mirror.sh upstream/images.json "$REG" "$NS"
+
+      - name: Update fingerprint
+        if: steps.fp.outputs.changed == 'true'
+        run: |
+          echo "${{ steps.fp.outputs.new }}" > state/ragflow_docker_fingerprint.txt
+
+      - name: Commit state back (auto)
+        if: steps.fp.outputs.changed == 'true'
+        run: |
+          git config user.name  "comintern-bot"
+          git config user.email "comintern-bot@users.noreply.github.com"
+          git add state/ragflow_docker_fingerprint.txt
+          git commit -m "chore(mirror): update ragflow docker fingerprint" || exit 0
+          git push
